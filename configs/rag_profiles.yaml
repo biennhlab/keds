@@ -1,0 +1,40 @@
+# Research profiles are opt-in; no measured Fashion-IQ improvement is claimed.
+# Labels E1-E5 from notebook 17 remain unmapped until its source is provided.
+profiles:
+  E0:
+    query_aware: {enabled: false}
+    knowledge_reranking: {enabled: false}
+    adaptive_k: {enabled: false}
+    adaptive_fusion: {enabled: false}
+    gallery_reranking: {enabled: false}
+    cache: {enabled: false}
+  hybrid_weighted:
+    query_aware: {enabled: true, method: weighted}
+  hybrid_rrf:
+    query_aware: {enabled: true, method: rrf}
+  hybrid_combined:
+    query_aware: {enabled: true, method: hybrid}
+  knowledge_rerank:
+    knowledge_reranking: {enabled: true}
+  knowledge_mmr:
+    knowledge_reranking: {enabled: true, mmr: true}
+  adaptive_k:
+    adaptive_k: {enabled: true}
+  adaptive_fusion:
+    adaptive_fusion: {enabled: true}
+  gallery_rerank:
+    gallery_reranking: {enabled: true}
+  gallery_mmr:
+    gallery_reranking: {enabled: true, mmr: true}
+  exact_cache:
+    cache: {enabled: true, semantic: false}
+  semantic_cache:
+    cache: {enabled: true, semantic: true}
+  combined_experimental:
+    query_aware: {enabled: true, method: hybrid}
+    knowledge_reranking: {enabled: true, mmr: true}
+    adaptive_k: {enabled: true}
+    adaptive_fusion: {enabled: true}
+    gallery_reranking: {enabled: true}
+    cache: {enabled: true, semantic: false}
+

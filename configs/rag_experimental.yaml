@@ -1,0 +1,10 @@
+extends: model.yaml
+rag:
+  profile: combined_experimental
+  query_aware: {enabled: true, method: hybrid}
+  knowledge_reranking: {enabled: true, mmr: true}
+  adaptive_k: {enabled: true}
+  adaptive_fusion: {enabled: true}
+  gallery_reranking: {enabled: true}
+  cache: {enabled: true, semantic: false}
+

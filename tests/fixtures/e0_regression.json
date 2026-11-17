@@ -1,0 +1,18 @@
+{
+  "provenance": "Actual E0 CLI output captured earlier in this implementation session; restored from recorded tool output after the runtime/workspace reports reset. This is a regression oracle, never a prediction source.",
+  "reference": "data/demo/dog.jpg",
+  "modification": "with two dogs instead of one",
+  "model_version": "author_bkp_v1-cf9bb9a5-5b2cbb23",
+  "knowledge_version": "8b1f0cff454a46ce",
+  "results": [
+    {"image_id": "72ed3ef65cd06ae0248b7fa0", "score": 0.20971879363059998},
+    {"image_id": "657fdbf1ead302ab6b422eb7", "score": 0.20648926496505737},
+    {"image_id": "810ff72a02d81f301bf203d4", "score": 0.1787245124578476}
+  ],
+  "details": {
+    "neighbors": {
+      "image": {"indices": [[487360,449434,4103,446362,414573,136236,266778,163416,284445,428929,280099,172257,273768,449052,91288,281375]]},
+      "text": {"indices": [[119528,321091,475413,409523,217085,300380,194554,28610,5388,63090,67287,309052,162996,321159,444431,227434]]}
+    }
+  }
+}

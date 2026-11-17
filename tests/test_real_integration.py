@@ -51,15 +51,15 @@ def test_real_composition_regression_and_image_modes(real_engine):
     torch.testing.assert_close(identity, native, rtol=1e-6, atol=1e-6)
     gallery = real_engine.gallery
     rows = gallery.search(first.unsqueeze(0), 3, exclude_hash=image_digest(image))
-    old = read_json("reports/real_search.json")
+    old = read_json("tests/fixtures/e0_regression.json")
     assert [r["image_id"] for r in rows] == [r["image_id"] for r in old["results"]]
     np.testing.assert_allclose([r["score"] for r in rows], [r["score"] for r in old["results"]], atol=1e-5)
     assert all(Path(row["image_path"]).is_file() for row in rows)
     # Exercise actual frozen CLIP backward into the trained BKP without taking
     # an optimizer step or modifying downloaded weights.
     stream = real_engine.streams.phi_m.requires_grad_(True)
-    ni = real_engine.database.images[torch.tensor(old["details"]["neighbors"]["image"]["indices"])]
-    nt = real_engine.database.texts[torch.tensor(old["details"]["neighbors"]["text"]["indices"])]
+    ni = real_engine.database.rows("image", old["details"]["neighbors"]["image"]["indices"])
+    nt = real_engine.database.rows("text", old["details"]["neighbors"]["text"]["indices"])
     pseudo = stream(encoded[:1], ni, nt)
     composed = real_engine.clip.compose(["a photo of *"], pseudo)
     (1 - (composed * encoded[:1]).sum()).backward()
@@ -119,4 +119,19 @@ def test_real_api_search_upload_and_file_validation(real_engine, tmp_path, monke
                             headers={"x-admin-token": "unit-integration-token"})
         assert added.status_code == 200, added.text
         assert Gallery(root / "new").validate()["count"] == 1
+        # Explicit opt-in must traverse hybrid knowledge, reranking, adaptive
+        # streams and gallery reranking with the same real frozen checkpoints.
+        advanced = client.post("/api/v1/search", data={**request, "rag_profile": "combined_experimental"},
+                               files={"image": ("reference.jpg", payload, "image/jpeg")})
+        assert advanced.status_code == 200, advanced.text
+        advanced_output = advanced.json()
+        assert advanced_output["details"]["knowledge_k_used"] in (4, 8, 16, 32)
+        assert 0.1 <= advanced_output["details"]["alpha_used"] <= 0.9
+        assert all(r["score_type"] == "reranking_relevance" for r in advanced_output["results"])
+        write_json("reports/rag_api_verified.json", advanced_output)
+        for repeat in range(2):
+            cached = client.post("/api/v1/search", data={**request, "rag_profile": "exact_cache"},
+                files={"image": ("reference.jpg", payload, "image/jpeg")}).json()
+            assert [r["image_id"] for r in cached["results"]] == [r["image_id"] for r in output["results"]]
+        assert cached["details"]["composed_cache_hit"]
 

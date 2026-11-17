@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from keds.utils.io import sha256
+from .storage import read_bank_archive
 
 
 class KnowledgeDatabase:
     def __init__(self, path, expected_count=500000, dim=768):
         self.path = path
         self.sha256 = sha256(path)
-        self.payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        self.payload = read_bank_archive(path)
         self.images = self.payload["image_features"]
         self.texts = self.payload["text_features"]
         if self.images.ndim != 2 or self.images.shape != self.texts.shape or self.images.shape[1] != dim:
@@ -28,10 +30,11 @@ class KnowledgeDatabase:
         stats = {}
         for name, features in (("image", self.images), ("text", self.texts)):
             min_norm, max_norm = float("inf"), 0.0
-            for block in features.split(chunk_size):
-                if not torch.isfinite(block).all():
+            for offset in range(0, self.size, chunk_size):
+                block = features[offset:offset+chunk_size]
+                if not np.isfinite(block).all():
                     raise ValueError(f"Knowledge {name} embeddings contain NaN/Inf")
-                norms = block.float().norm(dim=-1)
+                norms = np.linalg.norm(block.astype(np.float32, copy=False), axis=-1)
                 if (norms <= 1e-12).any():
                     raise ValueError(f"Knowledge {name} embeddings contain zero vectors")
                 min_norm = min(min_norm, float(norms.min()))
@@ -41,4 +44,10 @@ class KnowledgeDatabase:
         return {"count": self.size, "dim": self.dim, "sha256": self.sha256,
                 "features": stats, "metadata": self.metadata,
                 "has_ids": self.ids is not None, "has_captions": self.captions is not None}
+
+    def rows(self, modality, indices):
+        features = self.images if modality == "image" else self.texts
+        if isinstance(indices, torch.Tensor):
+            indices = indices.detach().cpu().numpy()
+        return torch.from_numpy(np.array(features[indices], dtype=np.float32, copy=True))
 

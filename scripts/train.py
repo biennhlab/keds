@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
     def loss_fn(stream, batch):
         indices = batch[0]
-        visual = engine.database.images[indices].to(engine.device).float()
+        visual = engine.database.rows("image", indices).to(engine.device)
         neighbors_i, neighbors_t, _ = engine.knowledge.retrieve(visual,
             engine.config["knowledge"]["top_k"], exclude_indices=indices.numpy())
         pseudo = stream(visual, neighbors_i, neighbors_t)

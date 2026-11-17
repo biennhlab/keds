@@ -6,6 +6,8 @@ class SearchResult(BaseModel):
     image_id: str
     score: float
     image_url: str
+    score_type: str = "cosine"
+    cosine_score: float | None = None
 
 
 class SearchResponse(BaseModel):

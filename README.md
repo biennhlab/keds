@@ -3,8 +3,16 @@
 Hệ thống nhận **reference image + modification text**, chạy CLIP ViT-L/14,
 truy xuất knowledge CC3M 500K, tạo pseudo-words bằng Phi-M/Phi-A và trả về
 Top-K ảnh thật từ **target gallery riêng** qua FAISS. Có Python API, CLI,
-FastAPI và Gradio. `plan.md` là kế hoạch gốc; xem [progress.md](progress.md)
-và [audit](docs/audit.md) để biết phần nào đã được xác minh.
+FastAPI và Gradio. 
+**Advanced Multimodal RAG** đã được thêm dưới dạng profile opt-in: query-aware
+hybrid/RRF knowledge retrieval, knowledge MMR/reranking, adaptive K/alpha, gallery
+reranking và versioned semantic/exact caches.
+
+```powershell
+.venv/Scripts/python.exe scripts/search.py --image data/demo/dog.jpg --text "with two dogs instead of one" --gallery artifacts/gallery/demo --rag-profile combined_experimental --top-k 3
+.venv/Scripts/python.exe scripts/profile_rag.py --repeats 2
+# Gradio: chọn Research settings → RAG profile; REST: field rag_profile.
+```
 
 Đây là **author-style approximation v21** được chủ dự án huấn luyện trước,
 không tự nhận exact paper reproduction. Không train từ epoch 0 hoặc encode lại
@@ -53,7 +61,7 @@ file khác checksum được giữ nguyên và công cụ dừng với lỗi rõ
 
 Đường dẫn, device, alpha, K và prompt ở `configs/model.yaml`; đường dẫn tương đối
 được tính từ thư mục cha của `configs/`. `device: auto` chọn CUDA nếu có, CPU nếu
-không. Lockfile mặc định cài CPU torch; máy GPU cần thay torch bằng build CUDA
+không. Lockfile dùng Windows PyPI CPU wheel và Linux CPU index; máy GPU cần thay torch bằng build CUDA
 tương thích PyTorch 2.6 cho driver của máy, sau đó dùng `--no-sync` để giữ build đó.
 
 `author_bkp_v1`: IM2TEXT 768→512→512→768 và hai CrossFormer 3 lớp, 8 heads × 64.
@@ -136,8 +144,8 @@ Unit tests dùng tensor nhỏ để kiểm tra số học, inject/EOT, exact FAI
 checksums và optimizer/RNG roundtrip. Các fixtures số học này không được dùng làm
 dữ liệu/prediction của ứng dụng. Integration opt-in chạy CLIP thật + DB500K + hai
 BEST thật + sáu ảnh thật, kiểm tra determinism/regression/API và frozen CLIP backward
-vào BKP. Chạy search CLI một lần với `--output reports/real_search.json` trước
-integration nếu report regression chưa tồn tại. Official module/protocol parity
+vào BKP. E0 oracle cố định ở `tests/fixtures/e0_regression.json`, không phụ thuộc
+report có thể bị ghi lại bởi CLI. Official module/protocol parity
 tests tự skip nếu chưa checkout các metadata/source trong `references/`.
 
 ## Evaluation và ablation

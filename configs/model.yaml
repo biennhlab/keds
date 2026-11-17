@@ -37,4 +37,12 @@ api:
   max_image_pixels: 25000000
   max_top_k: 100
   load_on_startup: true
+rag:
+  profile: E0
+  query_aware: {enabled: false}
+  knowledge_reranking: {enabled: false}
+  adaptive_k: {enabled: false}
+  adaptive_fusion: {enabled: false}
+  gallery_reranking: {enabled: false}
+  cache: {enabled: false}
 

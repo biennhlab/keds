@@ -8,7 +8,16 @@ import yaml
 
 def load_config(path: str | Path | None = None) -> dict:
     path = Path(path or os.environ.get("KEDS_CONFIG", "configs/model.yaml")).resolve()
-    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    from keds.rag.config import merge
+
+    def read(current, seen):
+        if current in seen:
+            raise ValueError("Circular YAML extends")
+        values = yaml.safe_load(current.read_text(encoding="utf-8"))
+        base = values.pop("extends", None)
+        return merge(read((current.parent / base).resolve(), seen | {current}), values) if base else values
+
+    config = read(path, set())
     root = path.parent.parent
     for section, names in {
         "model": ("weights_path",),
@@ -33,5 +42,7 @@ def load_config(path: str | Path | None = None) -> dict:
     if template.count("*") != 1 or template.count("{modification}") != 1:
         raise ValueError("Prompt requires one placeholder and one modification field")
     config["config_path"] = str(path)
+    profiles = root / "configs/rag_profiles.yaml"
+    config["rag_profiles"] = yaml.safe_load(profiles.read_text())["profiles"] if profiles.exists() else {}
     return config
 

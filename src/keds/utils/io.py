@@ -10,8 +10,9 @@ from pathlib import Path
 def sha256(path: str | Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            h.update(chunk)
+        buffer = bytearray(1024 * 1024)
+        while (count := f.readinto(buffer)):
+            h.update(memoryview(buffer)[:count])
     return h.hexdigest()
 
 

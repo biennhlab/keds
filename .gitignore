@@ -11,6 +11,5 @@ dist/
 artifacts/
 data/
 references/
-!reports/
-reports/*.log
-
+reports
+progress.md

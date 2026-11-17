@@ -54,6 +54,7 @@ class Gallery:
         self.records = [json.loads(line) for line in
                         (self.generation / "gallery_metadata.jsonl").read_text(encoding="utf-8").splitlines()]
         self.by_id = {r["image_id"]: r for r in self.records}
+        self.row_by_id = {r["image_id"]: i for i, r in enumerate(self.records)}
         self.index = faiss.read_index(str(self.generation / "gallery.faiss"))
         self.embeddings = np.load(self.generation / "gallery_embeddings.npy", mmap_mode="r")
         n, dim = self.manifest["count"], self.manifest["dim"]
@@ -86,7 +87,7 @@ class Gallery:
         return {"gallery_id": self.gallery_id, "version": self.version,
                 "count": len(self.records), "valid": True}
 
-    def search(self, query, top_k=10, exclude_ids=(), exclude_hash=None):
+    def search(self, query, top_k=10, exclude_ids=(), exclude_hash=None, candidate_ids=None):
         if top_k <= 0:
             raise ValueError("top_k must be positive")
         excluded = set(exclude_ids)
@@ -95,7 +96,17 @@ class Gallery:
         q = normalized_numpy(query, self.index.d)
         if len(q) != 1:
             raise ValueError("Gallery.search expects one query")
-        scores, indices = self.index.search(q, min(len(self.records), top_k + len(excluded)))
+        if candidate_ids is None:
+            scores, indices = self.index.search(q, min(len(self.records), top_k + len(excluded)))
+        else:
+            candidates = list(candidate_ids)
+            if not candidates or len(candidates) != len(set(candidates)) or not set(candidates) <= self.by_id.keys():
+                raise ValueError("Candidate IDs must be unique members of the fixed gallery")
+            rows = np.asarray([self.row_by_id[i] for i in candidates], dtype=np.int64)
+            index = faiss.IndexFlatIP(self.index.d)
+            index.add(np.ascontiguousarray(self.embeddings[rows]))
+            scores, local = index.search(q, min(len(rows), top_k + len(excluded)))
+            indices = rows[local]
         output = []
         for score, index in zip(scores[0], indices[0]):
             if index < 0:

@@ -18,6 +18,7 @@ if __name__ == "__main__":
     p.add_argument("--gallery", default="demo")
     p.add_argument("--output", default="reports/live_smoke.json")
     p.add_argument("--compare", action="store_true")
+    p.add_argument("--rag-profile", default="E0")
     args = p.parse_args()
     report = {}
     with httpx.Client(base_url=args.url, timeout=300, trust_env=False, follow_redirects=True) as client:
@@ -29,16 +30,17 @@ if __name__ == "__main__":
     ui.predict(api_name="/refresh")  # Same gallery population event as browser page load.
     start = time.perf_counter()
     photos, details = ui.predict(handle_file(args.image), "with two dogs instead of one", args.gallery,
-                                3, "keds", 0.5, 16, api_name="/run_search")
+                                3, "keds", 0.5, 16, args.rag_profile, api_name="/run_search")
     if len(photos) != 3 or len(details["results"]) != 3:
         raise ValueError("UI did not return three actual results")
     report["ui_search"] = {"result_count": len(photos), "latency_ms": (time.perf_counter()-start)*1000,
                            "model_version": details["model_version"], "gallery_id": details["gallery_id"],
                            "knowledge_version": details["knowledge_version"],
+                           "rag_profile": details["details"]["rag_profile"],
                            "result_ids": [r["image_id"] for r in details["results"]]}
     if args.compare:
         baseline, ked_photos, compared = ui.predict(handle_file(args.image), "with two dogs instead of one",
-            args.gallery, 3, 0.5, 16, api_name="/compare")
+            args.gallery, 3, 0.5, 16, args.rag_profile, api_name="/compare")
         if len(baseline) != 3 or len(ked_photos) != 3:
             raise ValueError("Comparison did not return actual photos for both modes")
         report["ui_comparison"] = {"baseline_mode": "CLIP_fusion", "baseline_count": len(baseline),

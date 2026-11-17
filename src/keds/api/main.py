@@ -154,6 +154,7 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
     def search(request: Request, image: UploadFile = File(...), modification: str = Form(...),
                gallery_id: str = Form(...), top_k: int = Form(10), mode: str = Form("keds"),
                alpha: float | None = Form(None), knowledge_k: int | None = Form(None),
+               rag_profile: str | None = Form(None),
                reference_id: str | None = Form(None), model=Depends(require_engine)):
         request_id, start = request.state.request_id, time.perf_counter()
         if not 1 <= top_k <= config["api"]["max_top_k"]:
@@ -165,7 +166,7 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
             gallery = get_gallery(gallery_id)
             output = model.retrieve(decoded, modification, top_k=top_k, gallery=gallery,
                                     exclude_ids=[reference_id] if reference_id else [],
-                                    mode=mode, alpha=alpha, knowledge_k=knowledge_k)
+                                    mode=mode, alpha=alpha, knowledge_k=knowledge_k, rag_profile=rag_profile)
         for row in output["results"]:
             row.pop("image_path")
             row["image_url"] = f"/api/v1/gallery/{gallery_id}/images/{row['image_id']}"

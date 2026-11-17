@@ -89,7 +89,9 @@ class KnowledgeRetriever:
                                    "retrieval": "independent", "metric": "cosine", "indexes": indexes})
 
     @torch.no_grad()
-    def retrieve(self, query, top_k=16, exclude_indices=None):
+    def search(self, query, top_k=16, modality="image", exclude_indices=None):
+        if modality not in ("image", "text"):
+            raise ValueError("Knowledge modality must be image or text")
         if not 1 <= top_k <= self.db.size - int(exclude_indices is not None):
             raise ValueError("Knowledge top_k exceeds available neighbors")
         q = normalized_numpy(query, self.db.dim)
@@ -98,21 +100,26 @@ class KnowledgeRetriever:
             excluded = np.asarray(exclude_indices, dtype=np.int64)
             if excluded.shape != (len(q),) or ((excluded < 0) | (excluded >= self.db.size)).any():
                 raise ValueError("Provide one valid excluded knowledge row per query")
+        best_scores = np.empty((len(q), 0), dtype=np.float32)
+        best_ids = np.empty((len(q), 0), dtype=np.int64)
+        for item in self.manifest["indexes"][modality]:
+            index = self._read_shard(item)
+            scores, ids = index.search(q, min(item["count"], top_k + int(excluded is not None)))
+            del index
+            ids += item["offset"]
+            if excluded is not None:
+                scores[ids == excluded[:, None]] = -np.inf
+            scores, ids = np.concatenate([best_scores, scores], 1), np.concatenate([best_ids, ids], 1)
+            order = np.lexsort((ids, -scores), axis=1)[:, :top_k]
+            best_scores, best_ids = np.take_along_axis(scores, order, 1), np.take_along_axis(ids, order, 1)
+        return best_ids, best_scores
+
+    @torch.no_grad()
+    def retrieve(self, query, top_k=16, exclude_indices=None):
         output, info = [], {}
-        for name, features in (("image", self.db.images), ("text", self.db.texts)):
-            best_scores = np.empty((len(q), 0), dtype=np.float32)
-            best_ids = np.empty((len(q), 0), dtype=np.int64)
-            for item in self.manifest["indexes"][name]:
-                index = self._read_shard(item)
-                scores, ids = index.search(q, min(item["count"], top_k + int(excluded is not None)))
-                del index
-                ids += item["offset"]
-                if excluded is not None:
-                    scores[ids == excluded[:, None]] = -np.inf
-                scores, ids = np.concatenate([best_scores, scores], 1), np.concatenate([best_ids, ids], 1)
-                order = np.lexsort((ids, -scores), axis=1)[:, :top_k]
-                best_scores, best_ids = np.take_along_axis(scores, order, 1), np.take_along_axis(ids, order, 1)
-            neighbors = F.normalize(features[torch.from_numpy(best_ids)].float(), dim=-1)
+        for name in ("image", "text"):
+            best_ids, best_scores = self.search(query, top_k, name, exclude_indices)
+            neighbors = F.normalize(self.db.rows(name, best_ids), dim=-1)
             output.append(neighbors.to(query.device))
             info[name] = {"indices": best_ids.tolist(), "scores": best_scores.tolist()}
             if self.db.ids is not None:

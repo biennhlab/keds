@@ -9,7 +9,8 @@ from keds.evaluation.datasets import require_full_gallery
 from keds.evaluation.metrics import ranking_metrics
 
 
-def evaluate_queries(engine, gallery, queries, official_ids, mode="keds", alpha=None, knowledge_k=None):
+def evaluate_queries(engine, gallery, queries, official_ids, mode="keds", alpha=None, knowledge_k=None,
+                     rag_profile=None, candidates=None):
     require_full_gallery(gallery, official_ids)
     global_rankings, subset_rankings, targets, latencies, diagnostics = [], [], [], [], []
     if torch.cuda.is_available():
@@ -21,12 +22,14 @@ def evaluate_queries(engine, gallery, queries, official_ids, mode="keds", alpha=
             raise ValueError("CIRR group IDs missing from full gallery")
         start = time.perf_counter()
         # No target or group information enters the composed query.
-        embedding = engine.encode_query(gallery.image_path(q.reference_id), q.modification,
-                                         mode=mode, alpha=alpha, knowledge_k=knowledge_k)
-        # Match official KEDs: CIRR removes reference ID; Fashion-IQ keeps the
-        # complete category gallery (get_metrics_fashion does no self removal).
-        ranking = gallery.search(embedding.unsqueeze(0), len(gallery.records),
-                                 exclude_ids=[q.reference_id] if q.exclude_reference else [])
+        candidate_ids = candidates.get(q.query_id) if candidates is not None else None
+        if candidate_ids is not None and q.target_id not in candidate_ids:
+            raise ValueError("Target missing from supplied Candidate-1500 pool; do not repair pools using labels")
+        output = engine.retrieve(gallery.image_path(q.reference_id), q.modification,
+            gallery=gallery, top_k=len(gallery.records), mode=mode, alpha=alpha, knowledge_k=knowledge_k,
+            rag_profile=rag_profile, exclude_ids=[q.reference_id] if q.exclude_reference else [],
+            exclude_reference=False, candidate_ids=candidate_ids)
+        ranking = output["results"]
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         latencies.append((time.perf_counter() - start) * 1000)
@@ -39,12 +42,15 @@ def evaluate_queries(engine, gallery, queries, official_ids, mode="keds", alpha=
             targets.append(q.target_id)
         diagnostics.append({"query_id": q.query_id, "reference_id": q.reference_id,
                             "target_id": q.target_id, "top_10": ids[:10],
-                            "target_rank": ids.index(q.target_id) + 1 if q.target_id else None})
+                            "target_rank": ids.index(q.target_id) + 1 if q.target_id else None,
+                            "latency_ms": latencies[-1]})
     if not latencies:
         raise ValueError("No evaluation queries")
     metrics = ranking_metrics(global_rankings, targets) if len(targets) == len(queries) else None
     subset = ranking_metrics(subset_rankings, targets, ks=(1, 2, 3)) if subset_rankings and metrics else None
-    return {"mode": mode, "alpha": alpha, "knowledge_k": knowledge_k,
+    return {"mode": mode, "alpha": alpha, "knowledge_k": knowledge_k, "rag_profile": rag_profile,
+            "protocol": "candidate1500" if candidates is not None else "full_gallery",
+            "candidate_manifest_sha256": candidates.sha256 if candidates is not None else None,
             "metrics": metrics, "subset_metrics": subset, "diagnostics": diagnostics,
             "latency_ms": {"p50": float(np.percentile(latencies, 50)),
                            "p95": float(np.percentile(latencies, 95))},

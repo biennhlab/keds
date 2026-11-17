@@ -20,13 +20,14 @@ if __name__ == "__main__":
     p.add_argument("--mode", choices=MODES, default="keds")
     p.add_argument("--alpha", type=float)
     p.add_argument("--knowledge-k", type=int)
+    p.add_argument("--rag-profile", help="Opt-in YAML research profile; E0 keeps original inference")
     p.add_argument("--output")
     args = p.parse_args()
     torch.set_num_threads(2)
     engine = KEDsEngine(args.config)
     engine.load_gallery(args.gallery)
     output = engine.retrieve(args.image, args.text, args.top_k, mode=args.mode,
-                             alpha=args.alpha, knowledge_k=args.knowledge_k)
+                             alpha=args.alpha, knowledge_k=args.knowledge_k, rag_profile=args.rag_profile)
     if args.output:
         write_json(args.output, output)
     print(json.dumps(output, indent=2))

@@ -3,6 +3,7 @@ import pytest
 from PIL import Image
 
 from keds.gallery.repository import Gallery, commit_gallery, image_digest, remove_images, safe_id
+from keds.rag.gallery_reranking import GalleryReranker
 
 
 def create_numeric_gallery(tmp_path):
@@ -40,4 +41,16 @@ def test_gallery_detects_corrupt_index_and_unsafe_ids(tmp_path):
     for value in ("../etc", "../../", "a/b", "", "a\\b"):
         with pytest.raises(ValueError):
             safe_id(value)
+
+
+def test_gallery_reranking_keeps_fixed_candidate_membership_and_reference_policy(tmp_path):
+    gallery = create_numeric_gallery(tmp_path)
+    ranker = GalleryReranker({"candidate_pool": 3,
+        "weights": {"composed": 0, "visual": 0, "text": 1}})
+    rows = ranker.rank(gallery, np.array([[1., 0., 0.]], dtype=np.float32),
+                       np.array([1., 0., 0.]), np.array([0., 1., 0.]), 3,
+                       exclude_ids=["0"], candidate_ids=["0", "1", "2"])
+    assert rows[0]["image_id"] == "1"
+    assert {row["image_id"] for row in rows} == {"1", "2"}
+    assert all("cosine_score" in row and "score_type" in row for row in rows)
 
