@@ -1,0 +1,15 @@
+# v21 LAST supports optimizer continuation, not proven exact continuation:
+# no notebook/objective ID/scheduler/RNG was exported by the source run.
+seed: 999
+batch_size: 128
+learning_rate: 0.0001
+weight_decay: 0.1
+until_epoch: 30
+phase: phi_m
+recipe: image_infonce_v1
+prompt: "a photo of *"
+temperature: 0.07
+resume_mode: optimizer_continuation
+# Phi-A requires the original audited loss + pseudo-triplet recipe.
+# Do not substitute SEARLE or create labels from benchmark ground truth.
+

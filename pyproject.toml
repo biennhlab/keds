@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keds-cir"
+version = "0.1.0"
+description = "Artifact-validated KEDs composed image retrieval service"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "torch==2.6.0", "transformers==4.46.3", "numpy==1.26.4",
+  "faiss-cpu==1.10.0", "Pillow==11.3.0", "PyYAML==6.0.2",
+  "huggingface-hub==0.36.0", "fastapi==0.115.14", "uvicorn==0.34.3",
+  "python-multipart==0.0.20", "httpx==0.28.1", "gradio==5.49.1",
+  "filelock==3.19.1", "python-dotenv==1.1.1", "accelerate==1.1.1"
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "ruff==0.14.4", "einops==0.8.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["artifacts: requires downloaded real checkpoints and CLIP", "benchmark: requires full benchmark data"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+

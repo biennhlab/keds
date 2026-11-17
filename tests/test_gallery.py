@@ -1,0 +1,43 @@
+import numpy as np
+import pytest
+from PIL import Image
+
+from keds.gallery.repository import Gallery, commit_gallery, image_digest, remove_images, safe_id
+
+
+def create_numeric_gallery(tmp_path):
+    path = tmp_path / "unit-gallery"
+    (path / "images").mkdir(parents=True)
+    records = []
+    for i in range(3):
+        image = Image.new("RGB", (3, 3), (i * 70, 0, 10))
+        image.save(path / "images" / f"{i}.png")
+        records.append({"image_id": str(i), "image_path": f"images/{i}.png",
+                        "pixel_sha256": image_digest(image)})
+    return commit_gallery(path, records, np.eye(3, dtype=np.float32), "unit-math", "unit-math")
+
+
+def test_search_ids_self_exclusion_and_transactional_delete(tmp_path):
+    gallery = create_numeric_gallery(tmp_path)
+    assert gallery.validate()["valid"]
+    results = gallery.search([[1, 0, 0]], top_k=3, exclude_ids=["0"])
+    assert len(results) == 2 and all(r["image_id"] != "0" for r in results)
+    old_version = gallery.version
+    updated = remove_images(gallery.path, iter(["0"]))
+    assert len(updated.records) == 2 and updated.version != old_version
+    assert len(gallery.records) == 3  # Already loaded snapshot remains valid.
+    assert (gallery.path / "generations" / old_version).is_dir()
+    with pytest.raises(ValueError, match="at least one"):
+        remove_images(gallery.path, ["1", "2"])
+    assert Gallery(gallery.path).version == updated.version
+
+
+def test_gallery_detects_corrupt_index_and_unsafe_ids(tmp_path):
+    gallery = create_numeric_gallery(tmp_path)
+    (gallery.generation / "gallery.faiss").write_bytes(b"invalid")
+    with pytest.raises(ValueError, match="checksum"):
+        Gallery(gallery.path)
+    for value in ("../etc", "../../", "a/b", "", "a\\b"):
+        with pytest.raises(ValueError):
+            safe_id(value)
+
