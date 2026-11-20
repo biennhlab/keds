@@ -25,6 +25,9 @@ def test_sharded_exact_cosine_matches_bruteforce_and_excludes_id(tmp_path):
     assert i.shape == t.shape == (2, 4, 8)
     assert retriever.validate_order()
     assert info["image"]["indices"] != info["text"]["indices"]
+    resident = KnowledgeRetriever(db, tmp_path / "indexes", resident_indexes=True)
+    _, _, resident_info = resident.retrieve(query, 4, exclude_indices=[0, 8])
+    assert resident_info == info
     with pytest.raises(ValueError):
         retriever.retrieve(query, 23, exclude_indices=[0, 8])
 

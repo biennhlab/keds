@@ -24,12 +24,13 @@ knowledge:
   top_k: 16
   retrieval: independent
 checkpoints:
-  phi_m: artifacts/checkpoints/phi_m_best_author_modules.pt
-  phi_a: artifacts/checkpoints/phi_a_best_author_modules.pt
+  phi_m: artifacts/checkpoints/359deb00753a732d0c18342e843678eb49cb7919/phi_m_best_author_modules.pt
+  phi_a: artifacts/checkpoints/359deb00753a732d0c18342e843678eb49cb7919/phi_a_best_author_modules.pt
 inference:
   alpha: 0.5
   prompt_template: "a photo of * , {modification}"
   max_text_length: 500
+  reference_cache: true
 gallery:
   root: artifacts/gallery
 api:

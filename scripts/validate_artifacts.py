@@ -69,7 +69,7 @@ def validate(config_path, build_indexes=False):
                     if actual != record["sha256"]:
                         raise ValueError("Downloaded artifact differs from pinned manifest")
                     return {"sha256": actual, "revision": record["revision"]}
-                check("checksum_" + record["file"], checksum_check)
+                check(f"checksum_{record['revision'][:8]}_{record['file']}", checksum_check)
     return report
 
 

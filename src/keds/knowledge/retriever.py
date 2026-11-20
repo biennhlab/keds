@@ -18,9 +18,10 @@ class KnowledgeRetriever:
     Flat indexes cannot memory-map their vectors; stream shards rather than
     allocating two 1.5 GB indexes plus reallocation and CLIP weights in RAM.
     """
-    def __init__(self, database, index_dir, build=False, shard_size=16384):
+    def __init__(self, database, index_dir, build=False, shard_size=16384, resident_indexes=False):
         self.db = database
         self.index_dir = Path(index_dir)
+        self._resident = {}
         if build:
             self.build(shard_size)
         self.manifest = read_json(self.index_dir / "manifest.json")
@@ -34,7 +35,9 @@ class KnowledgeRetriever:
                 path = self._shard_path(item)
                 if item["offset"] != offset or sha256(path) != item["sha256"]:
                     raise ValueError("Knowledge shard ordering/checksum mismatch")
-                index = self._read_shard(item)
+                index = self._shard(item)
+                if resident_indexes:
+                    self._resident[item["file"]] = index
                 offset += index.ntotal
                 del index
             if offset != database.size:
@@ -53,6 +56,10 @@ class KnowledgeRetriever:
                 index.d != self.db.dim):
             raise ValueError("Knowledge shard must be IndexFlatIP with matching shape")
         return index
+
+    def _shard(self, item):
+        cached = self._resident.get(item["file"])
+        return self._read_shard(item) if cached is None else cached
 
     def build(self, shard_size):
         self.index_dir.mkdir(parents=True, exist_ok=True)
@@ -103,7 +110,7 @@ class KnowledgeRetriever:
         best_scores = np.empty((len(q), 0), dtype=np.float32)
         best_ids = np.empty((len(q), 0), dtype=np.int64)
         for item in self.manifest["indexes"][modality]:
-            index = self._read_shard(item)
+            index = self._shard(item)
             scores, ids = index.search(q, min(item["count"], top_k + int(excluded is not None)))
             del index
             ids += item["offset"]

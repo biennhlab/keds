@@ -27,10 +27,20 @@ def test_search_ids_self_exclusion_and_transactional_delete(tmp_path):
     updated = remove_images(gallery.path, iter(["0"]))
     assert len(updated.records) == 2 and updated.version != old_version
     assert len(gallery.records) == 3  # Already loaded snapshot remains valid.
+    assert Gallery(gallery.path, version=old_version).image_path("0") == gallery.image_path("0")
+    assert updated.search([[1, 0, 0]], exclude_ids=["1", "2"]) == []
     assert (gallery.path / "generations" / old_version).is_dir()
     with pytest.raises(ValueError, match="at least one"):
         remove_images(gallery.path, ["1", "2"])
     assert Gallery(gallery.path).version == updated.version
+
+
+def test_failed_update_does_not_publish_invalid_generation(tmp_path):
+    gallery = create_numeric_gallery(tmp_path)
+    invalid = [{**gallery.records[0], "image_path": "images/no-such-file.png"}]
+    with pytest.raises(ValueError, match="image path missing"):
+        commit_gallery(gallery.path, invalid, gallery.embeddings[:1], "unit-math", "unit-math")
+    assert Gallery(gallery.path).version == gallery.version
 
 
 def test_gallery_detects_corrupt_index_and_unsafe_ids(tmp_path):
@@ -41,6 +51,13 @@ def test_gallery_detects_corrupt_index_and_unsafe_ids(tmp_path):
     for value in ("../etc", "../../", "a/b", "", "a\\b"):
         with pytest.raises(ValueError):
             safe_id(value)
+
+
+def test_gallery_validation_detects_replaced_pixels(tmp_path):
+    gallery = create_numeric_gallery(tmp_path)
+    Image.new("RGB", (3, 3), "yellow").save(gallery.image_path("0"))
+    with pytest.raises(ValueError, match="pixels differ"):
+        gallery.validate()
 
 
 def test_gallery_reranking_keeps_fixed_candidate_membership_and_reference_policy(tmp_path):

@@ -1,5 +1,8 @@
 # Audit và quyết định tương thích
 
+Xem [audit demo 2026-11-18](demo_audit.md) để biết BEST hiện dùng, kết quả kiểm thử và
+phạm vi đối chiếu Notebook 19D. Các mục bên dưới ghi lại audit lịch sử của bản cũ.
+
 Đối chiếu ngày 2026-11-17; giữ nguyên `plan.md` và toàn bộ file/tài nguyên ban đầu.
 
 ## Inventory

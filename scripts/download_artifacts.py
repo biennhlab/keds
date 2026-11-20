@@ -19,6 +19,7 @@ from huggingface_hub import HfApi, hf_hub_download
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ("nightfurry/keds-500k-training-resume", "f14b9e3568e8e57fe522c7cf3397dc973840d632")
 RESUME = ("nightfurry/keds-500k-resume-training-v21", "42dcde4c9b437e1eac8978c7bed9de117178b12b")
+BEST = (RESUME[0], "359deb00753a732d0c18342e843678eb49cb7919")
 
 
 def digest(path):
@@ -41,17 +42,21 @@ def main():
     records = json.loads(report.read_text()) if report.exists() else []
     downloads = [
         (SOURCE, "source", ([] if args.skip_knowledge else ["keds_knowledge_db.pt"])),
-        (RESUME, "checkpoints", ["phi_m_best_author_modules.pt", "phi_a_best_author_modules.pt"] +
-         (["phi_m_last.pt", "phi_a_last.pt"] if args.resume else [])),
+        (BEST, f"checkpoints/{BEST[1]}", ["phi_m_best_author_modules.pt", "phi_a_best_author_modules.pt",
+                                           "best_metrics.json", "resume_report.json"]),
         (RESUME, "metadata", ["resume_report.json", "best_metrics.json", "retrieval_cache_metadata_v21.json"]),
         (SOURCE, "metadata", ["official_parity_preflight.json", "cc3m_shard_manifest.json"]),
     ]
+    if args.resume:
+        downloads.append((RESUME, "checkpoints", ["phi_m_last.pt", "phi_a_last.pt"]))
     if args.clip:
         downloads.append((("openai/clip-vit-large-patch14", "32bd64288804d66eefd0ccbe215aa642df71cc41"),
                           "clip", ["config.json", "preprocessor_config.json", "tokenizer.json",
                                    "tokenizer_config.json", "special_tokens_map.json", "vocab.json",
                                    "merges.txt", "model.safetensors"]))
     for (repo, revision), folder, names in downloads:
+        if not names:
+            continue
         info = HfApi(token=token).model_info(repo, revision=revision, files_metadata=True)
         siblings = {x.rfilename: x for x in info.siblings}
         for name in names:
@@ -75,7 +80,8 @@ def main():
                 record.update({"local_path": str(Path(result).relative_to(ROOT)),
                                "sha256": actual, "download_verified": True})
                 print(f"Verified {name}: {actual}", flush=True)
-            records = [x for x in records if (x["repo"], x["file"]) != (repo, name)] + [record]
+            records = [x for x in records if (x["repo"], x["revision"], x["file"]) !=
+                       (repo, revision, name)] + [record]
     report.parent.mkdir(exist_ok=True)
     report.write_text(json.dumps(records, indent=2), encoding="utf-8")
 

@@ -13,11 +13,12 @@ import torch
 import yaml
 from fastapi.testclient import TestClient
 from PIL import Image
+from torch.nn.functional import normalize
 
 from keds.api.main import create_app
 from keds.gallery.repository import Gallery, image_digest
 from keds.inference.engine import KEDsEngine
-from keds.utils.io import read_json, write_json
+from keds.utils.io import write_json
 
 pytestmark = [pytest.mark.artifacts, pytest.mark.skipif(
     not os.environ.get("KEDS_TEST_ARTIFACTS"), reason="Set KEDS_TEST_ARTIFACTS=1 for actual full pipeline")]
@@ -30,18 +31,24 @@ def real_engine():
     return engine
 
 
-def test_real_composition_regression_and_image_modes(real_engine):
+def test_real_composition_regression_and_image_modes(real_engine, tmp_path):
     image = Image.open("data/demo/dog.jpg").convert("RGB")
     modes = [image, image.convert("RGBA"), image.convert("L")]
     encoded = real_engine.clip.encode_images(modes)
     assert encoded.shape == (3, 768) and torch.isfinite(encoded).all()
     torch.testing.assert_close(encoded[0], encoded[1], atol=1e-6, rtol=1e-6)
     text = "with two dogs instead of one"
-    first = real_engine.encode_query(image, text)
-    second = real_engine.encode_query(image, text)
+    first, first_details = real_engine.encode_query(image, text, return_details=True)
+    second, second_details = real_engine.encode_query(image, text, return_details=True)
     torch.testing.assert_close(first, second, atol=1e-6, rtol=1e-6)
     assert first.shape == (768,) and first.dtype == torch.float32
     assert first.norm().item() == pytest.approx(1.0, abs=1e-6)
+    assert real_engine.version == "author_bkp_v1-cf9bb9a5-f5049491"
+    assert second_details["knowledge_cache_hit"] and not second_details["composed_cache_hit"]
+    alternative = real_engine.encode_query(image, "in a city next to a blue bus")
+    assert torch.dot(first, alternative).item() < 0.99
+    batched = real_engine.encode_queries([image, image], [text, "in a city next to a blue bus"], rag_profile="E0")
+    torch.testing.assert_close(batched, torch.stack([first, alternative]), atol=1e-5, rtol=1e-4)
     # A one-token identity replacement must reproduce CLIP's native text path.
     with torch.no_grad():
         marker = real_engine.clip.clip.text_model.embeddings.token_embedding.weight[
@@ -51,15 +58,18 @@ def test_real_composition_regression_and_image_modes(real_engine):
     torch.testing.assert_close(identity, native, rtol=1e-6, atol=1e-6)
     gallery = real_engine.gallery
     rows = gallery.search(first.unsqueeze(0), 3, exclude_hash=image_digest(image))
-    old = read_json("tests/fixtures/e0_regression.json")
-    assert [r["image_id"] for r in rows] == [r["image_id"] for r in old["results"]]
-    np.testing.assert_allclose([r["score"] for r in rows], [r["score"] for r in old["results"]], atol=1e-5)
+    direct_scores = gallery.embeddings @ first.numpy()
+    expected = [gallery.records[i]["image_id"] for i in np.argsort(-direct_scores)
+                if gallery.records[i]["pixel_sha256"] != image_digest(image)][:3]
+    assert [r["image_id"] for r in rows] == expected
+    np.testing.assert_allclose([r["score"] for r in rows],
+                               [direct_scores[gallery.row_by_id[key]] for key in expected], atol=1e-6)
     assert all(Path(row["image_path"]).is_file() for row in rows)
     # Exercise actual frozen CLIP backward into the trained BKP without taking
     # an optimizer step or modifying downloaded weights.
     stream = real_engine.streams.phi_m.requires_grad_(True)
-    ni = real_engine.database.rows("image", old["details"]["neighbors"]["image"]["indices"])
-    nt = real_engine.database.rows("text", old["details"]["neighbors"]["text"]["indices"])
+    ni = real_engine.database.rows("image", first_details["neighbors"]["image"]["indices"])
+    nt = real_engine.database.rows("text", first_details["neighbors"]["text"]["indices"])
     pseudo = stream(encoded[:1], ni, nt)
     composed = real_engine.clip.compose(["a photo of *"], pseudo)
     (1 - (composed * encoded[:1]).sum()).backward()
@@ -68,13 +78,51 @@ def test_real_composition_regression_and_image_modes(real_engine):
     stream.zero_grad(set_to_none=True)
     stream.requires_grad_(False)
     # Store a numeric regression artifact with the complete checkpoint/config provenance.
-    np.save("reports/regression_query.npy", first.numpy(), allow_pickle=False)
-    write_json("reports/regression_verified.json", {"deterministic": True, "shape": [768],
+    np.save(tmp_path / "regression_query.npy", first.numpy(), allow_pickle=False)
+    write_json(tmp_path / "regression_verified.json", {"deterministic": True, "shape": [768],
                "dtype": "float32", "gallery_count": len(gallery.records),
                "model": real_engine.info(), "ranked_ids": [r["image_id"] for r in rows]})
     for invalid in ("", "  ", "has * marker"):
         with pytest.raises(ValueError):
             real_engine.encode_query(image, invalid)
+
+
+@torch.inference_mode()
+def test_notebook_fixed_k_composer_parity(real_engine):
+    encoder = real_engine.clip
+    tokenizer = encoder.tokenizer
+    text = "with two dogs instead of one"
+    image = "data/demo/dog.jpg"
+    prod, details = real_engine.encode_query(image, text, return_details=True)
+    visual = encoder.encode_images([image])
+    ni = real_engine.database.rows("image", details["neighbors"]["image"]["indices"]).to(visual.device)
+    nt = real_engine.database.rows("text", details["neighbors"]["text"]["indices"]).to(visual.device)
+    model = encoder.clip.text_model
+
+    def notebook_composition(prompt, pseudo):
+        before, after = prompt.split("*")
+        left, right = (tokenizer.encode(part, add_special_tokens=False) for part in (before, after))
+        row = [tokenizer.bos_token_id, *left, *([encoder.placeholder_id] * 3), *right, tokenizer.eos_token_id]
+        ids = torch.tensor([row], device=visual.device)
+        states = model.embeddings.token_embedding(ids)
+        states[:, 1 + len(left):4 + len(left)] = pseudo
+        states += model.embeddings.position_embedding(model.embeddings.position_ids[:, :len(row)])
+        mask = torch.full((len(row), len(row)), torch.finfo(states.dtype).min,
+                          dtype=states.dtype, device=states.device).triu(1)
+        hidden = model.encoder(inputs_embeds=states, causal_attention_mask=mask[None, None]).last_hidden_state
+        return normalize(encoder.clip.text_projection(model.final_layer_norm(hidden[:, -1])).float(), dim=-1)
+
+    pseudo = [stream(visual, ni, nt) for stream in (real_engine.streams.phi_m, real_engine.streams.phi_a)]
+    prod_prompt = real_engine.config["inference"]["prompt_template"].format(modification=text)
+    notebook_same_prompt = normalize(sum(notebook_composition(prod_prompt, token) for token in pseudo), dim=-1)[0].cpu()
+    torch.testing.assert_close(prod, notebook_same_prompt, atol=2e-6, rtol=2e-5)
+    notebook_prompt = "a photo of * and " + text
+    notebook_original_prompt = normalize(sum(notebook_composition(notebook_prompt, p) for p in pseudo), dim=-1)[0].cpu()
+    write_json("reports/demo_notebook_parity.json", {"model_version": real_engine.version,
+        "reference": image, "same_prompt_max_abs_error": float((prod - notebook_same_prompt).abs().max()),
+        "same_prompt_cosine": float(torch.dot(prod, notebook_same_prompt)),
+        "notebook_prompt_cosine": float(torch.dot(prod, notebook_original_prompt)),
+        "scope": "Notebook 19D insertion with same BEST pseudo tokens, not LAST30 checkpoint parity"})
 
 
 def test_real_api_search_upload_and_file_validation(real_engine, tmp_path, monkeypatch):
@@ -102,7 +150,7 @@ def test_real_api_search_upload_and_file_validation(real_engine, tmp_path, monke
             assert photo.status_code == 200
             with Image.open(io.BytesIO(photo.content)) as opened:
                 opened.verify()
-        write_json("reports/api_integration_verified.json", output)
+        write_json(tmp_path / "api_integration_verified.json", output)
         bad = client.post("/api/v1/search", data=request,
                           files={"image": ("looks-valid.png", b"not an image", "image/png")})
         assert bad.status_code == 422
@@ -119,6 +167,9 @@ def test_real_api_search_upload_and_file_validation(real_engine, tmp_path, monke
                             headers={"x-admin-token": "unit-integration-token"})
         assert added.status_code == 200, added.text
         assert Gallery(root / "new").validate()["count"] == 1
+        empty = client.post("/api/v1/search", data={**request, "gallery_id": "new"},
+                            files={"image": ("x.jpg", payload)})
+        assert empty.status_code == 200 and empty.json()["results"] == []
         # Explicit opt-in must traverse hybrid knowledge, reranking, adaptive
         # streams and gallery reranking with the same real frozen checkpoints.
         advanced = client.post("/api/v1/search", data={**request, "rag_profile": "combined_experimental"},
@@ -128,7 +179,7 @@ def test_real_api_search_upload_and_file_validation(real_engine, tmp_path, monke
         assert advanced_output["details"]["knowledge_k_used"] in (4, 8, 16, 32)
         assert 0.1 <= advanced_output["details"]["alpha_used"] <= 0.9
         assert all(r["score_type"] == "reranking_relevance" for r in advanced_output["results"])
-        write_json("reports/rag_api_verified.json", advanced_output)
+        write_json(tmp_path / "rag_api_verified.json", advanced_output)
         for repeat in range(2):
             cached = client.post("/api/v1/search", data={**request, "rag_profile": "exact_cache"},
                 files={"image": ("reference.jpg", payload, "image/jpeg")}).json()

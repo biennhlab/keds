@@ -27,6 +27,7 @@ if __name__ == "__main__":
     p.add_argument("--mode", choices=MODES, default="keds")
     p.add_argument("--alpha", type=float)
     p.add_argument("--knowledge-k", type=int)
+    p.add_argument("--batch-size", type=int, default=1, help="Batch CLIP and fixed-K E0 on full galleries")
     p.add_argument("--ablation", action="store_true", help="6 baselines/streams + alpha/K sweeps on val only")
     p.add_argument("--rag-profile", default="E0")
     p.add_argument("--rag-profiles", help="Comma-separated research profiles; development partition required")
@@ -72,6 +73,25 @@ if __name__ == "__main__":
             groups = {name: ([q for q in queries if partition["assignments"][q.query_id] == args.phase],
                              ids, provenance, gallery) for name, (queries, ids, provenance, gallery) in groups.items()}
     engine = KEDsEngine(args.config)
+    batch_parity = None
+    if args.batch_size > 1 and args.rag_profile == "E0" and candidates is None:
+        queries, _, _, gallery = next(iter(groups.values()))
+        first = queries[:2]
+        paths = [gallery.image_path(q.reference_id) for q in first]
+        texts = [q.modification for q in first]
+        options = {"mode": args.mode, "alpha": args.alpha, "knowledge_k": args.knowledge_k, "rag_profile": "E0"}
+        batched = engine.encode_queries(paths, texts, **options)
+        single = torch.stack([engine.encode_query(path, text, **options) for path, text in zip(paths, texts)])
+        torch.testing.assert_close(batched, single, atol=1e-5, rtol=1e-4)
+        def rank_ids(embedding):
+            return [r["image_id"] for r in gallery.search(embedding.unsqueeze(0), 10)]
+
+        for batch_vector, one_vector in zip(batched, single):
+            if rank_ids(batch_vector) != rank_ids(one_vector):
+                raise ValueError("Batch inference altered preflight top-10 ranking")
+        batch_parity = {"query_ids": [q.query_id for q in first], "top10_equal": True,
+                        "max_abs_error": float((batched - single).abs().max())}
+        print(f"Batch parity: {batch_parity}", flush=True)
     experiments = [(args.mode, args.alpha, args.knowledge_k)]
     if args.ablation:
         experiments = [(m, 0.5, 16) for m in MODES]
@@ -83,7 +103,7 @@ if __name__ == "__main__":
               "partitions_sha256": sha256(args.partitions) if args.partitions else None,
               "historical_tuning_overlap_verified": partition.get("historical_tuning_overlap_verified", False) if partition else False,
               "query_total": len(all_queries),
-              "model": engine.info(), "config": engine.config, "experiments": [],
+              "model": engine.info(), "config": engine.config, "experiments": [], "batch_parity": batch_parity,
               "overlap_audit": "Not verified: benchmark hashes unavailable in knowledge metadata"}
     for profile, mode, alpha, k in experiments:
         if profile not in engine.info()["available_rag_profiles"]:
@@ -92,9 +112,11 @@ if __name__ == "__main__":
         result = {"rag_profile": profile, "rag_settings": engine.settings(profile),
                   "mode": mode, "alpha": alpha, "knowledge_k": k, "categories": {}}
         for name, (queries, ids, provenance, gallery) in groups.items():
-            values = evaluate_queries(engine, gallery, queries, ids, mode, alpha, k, profile, candidates)
+            values = evaluate_queries(engine, gallery, queries, ids, mode, alpha, k, profile, candidates,
+                                      batch_size=args.batch_size)
             values["provenance"] = provenance
             result["categories"][name] = values
+            print(f"{name} {profile}/{mode}: {values['metrics']}", flush=True)
         if args.dataset == "fashioniq":
             result["macro_metrics"] = category_macro({n: v["metrics"] for n, v in result["categories"].items()})
         report["experiments"].append(result)

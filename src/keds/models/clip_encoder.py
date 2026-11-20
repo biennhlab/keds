@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import torch
 from PIL import Image, ImageOps
 from torch import nn
@@ -29,11 +32,17 @@ class CLIPEncoder(nn.Module):
     def __init__(self, backbone="openai/clip-vit-large-patch14", device="auto", revision="main",
                  local_files_only=False, weights_path=None, **_):
         super().__init__()
-        from transformers import CLIPImageProcessor, CLIPModel, CLIPTokenizer
+        from transformers import CLIPConfig, CLIPImageProcessor, CLIPModel, CLIPTokenizer
         self.device = resolve_device(device)
         options = {"revision": revision, "local_files_only": local_files_only}
         source = weights_path or backbone
-        self.clip = CLIPModel.from_pretrained(source, low_cpu_mem_usage=True, **options).to(self.device).eval()
+        if os.name == "nt" and self.device.type == "cpu" and (Path(source) / "model.safetensors").is_file():
+            from .clip_weights import load_cpu_clip
+
+            config = CLIPConfig.from_pretrained(source, attn_implementation="sdpa", **options)
+            self.clip = load_cpu_clip(source, CLIPModel, config).eval()
+        else:
+            self.clip = CLIPModel.from_pretrained(source, low_cpu_mem_usage=True, **options).to(self.device).eval()
         self.processor = CLIPImageProcessor.from_pretrained(source, **options)
         self.tokenizer = CLIPTokenizer.from_pretrained(source, **options)
         self.clip.requires_grad_(False)

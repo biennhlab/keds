@@ -7,9 +7,11 @@ class GalleryReranker:
     def __init__(self, config):
         self.config = config
 
-    def rank(self, gallery, query, visual, text, top_k, exclude_ids=(), exclude_hash=None, candidate_ids=None):
+    def rank(self, gallery, query, visual, text, top_k, exclude_ids=(), exclude_hash=None, candidate_ids=None,
+             include_image_paths=True):
         pool = max(top_k, self.config.get("candidate_pool", 100))
-        initial = gallery.search(query, pool, exclude_ids, exclude_hash, candidate_ids)
+        initial = gallery.search(query, pool, exclude_ids, exclude_hash, candidate_ids,
+                                 include_image_paths=include_image_paths)
         if not initial:
             return []
         n = min(len(initial), self.config.get("candidate_pool", 100))

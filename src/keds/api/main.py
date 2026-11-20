@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 import warnings
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,21 +19,28 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, UnidentifiedImageError
 
+from keds.api.schemas import SearchResponse
 from keds.gallery.repository import Gallery, add_images, list_galleries, remove_images, safe_id
 from keds.inference.engine import KEDsEngine
 from keds.utils.config import load_config
 from keds.utils.io import read_json
-from keds.api.schemas import SearchResponse
 
 logger = logging.getLogger("keds.api")
+
+
+def available_galleries(config):
+    return [entry for entry in list_galleries(config["gallery"]["root"], skip_invalid=True)
+            if entry.get("backbone") == config["model"]["backbone"]
+            and entry.get("clip_revision") == config["model"]["revision"]]
 
 
 def create_app(config_path=None, engine=None, load_on_startup=None):
     config = load_config(config_path)
     load_dotenv(Path(config["config_path"]).parent.parent / ".env")
     lock = threading.RLock()
+    gallery_lock = threading.Lock()
     state = {"engine": engine, "error": None}
-    gallery_cache = {}
+    gallery_cache = OrderedDict()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -41,7 +49,8 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
                 try:
                     state["engine"] = KEDsEngine(config["config_path"])
                 except Exception as e:
-                    state["error"] = type(e).__name__
+                    memory_limit = isinstance(e, MemoryError) or getattr(e, "winerror", None) == 1455
+                    state["error"] = "memory_limit" if memory_limit else type(e).__name__
                     logger.exception("Model startup failed; readiness remains false")
         yield
 
@@ -63,6 +72,8 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
 
     def require_engine():
         if state["engine"] is None:
+            if state["error"] == "memory_limit":
+                raise HTTPException(503, "Memory limit; close other model workers and restart the demo")
             raise HTTPException(503, "Model unavailable; validate artifacts and restart service")
         return state["engine"]
 
@@ -84,20 +95,25 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
             raise HTTPException(422, "Invalid gallery")
         return path
 
-    def get_gallery(gallery_id):
+    def get_gallery(gallery_id, version=None):
+        path = gallery_path(gallery_id)
+        if version is not None:
+            safe_id(version)
         try:
-            path = gallery_path(gallery_id)
-            generation = read_json(path / "CURRENT.json")["generation"]
-            cached = gallery_cache.get(gallery_id)
-            if cached is None or cached.version != generation:
-                cached = Gallery(path)
-                # Bound resident gallery index memory. Existing readers retain
-                # their immutable snapshot even after the cache changes.
-                gallery_cache.clear()
-                gallery_cache[gallery_id] = cached
-            return cached
+            with gallery_lock:
+                generation = version or read_json(path / "CURRENT.json")["generation"]
+                key = (gallery_id, generation)
+                if key not in gallery_cache:
+                    gallery_cache[key] = Gallery(path, version=generation)
+                    if len(gallery_cache) > 4:
+                        gallery_cache.popitem(last=False)
+                gallery_cache.move_to_end(key)
+                return gallery_cache[key]
         except FileNotFoundError as e:
-            raise HTTPException(404, "Gallery not found") from e
+            raise HTTPException(404, "Gallery or generation not found") from e
+        except (OSError, KeyError, TypeError, ValueError) as e:
+            logger.exception("Cannot load gallery %s", gallery_id)
+            raise HTTPException(503, "Gallery index or metadata is invalid; validate or rebuild it") from e
 
     def decode_upload(upload):
         data = upload.file.read(config["api"]["max_upload_mb"] * 1024 * 1024 + 1)
@@ -115,8 +131,9 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
                 with Image.open(io.BytesIO(data)) as checked:
                     from keds.models.clip_encoder import rgb_image
                     return rgb_image(checked)
-        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError,
-                Image.DecompressionBombWarning) as e:
+        except (Image.DecompressionBombError, Image.DecompressionBombWarning) as e:
+            raise HTTPException(413, "Image exceeds pixel limit") from e
+        except (UnidentifiedImageError, OSError, ValueError) as e:
             raise HTTPException(422, "Invalid or unsupported image") from e
 
     @app.exception_handler(ValueError)
@@ -130,25 +147,28 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
     @app.get("/ready")
     def ready():
         model_ready = state["engine"] is not None
-        galleries = list_galleries(config["gallery"]["root"])
-        ready = model_ready and bool(galleries)
-        if ready:
-            try:
-                with lock:
-                    get_gallery(galleries[0]["gallery_id"])
-            except (ValueError, OSError, HTTPException):
-                ready = False
+        galleries = available_galleries(config)
+        ready = False
+        if model_ready:
+            for entry in galleries:
+                try:
+                    get_gallery(entry["gallery_id"], entry["version"])
+                except HTTPException:
+                    continue
+                ready = True
+                break
         return JSONResponse(status_code=200 if ready else 503,
                             content={"ready": ready, "model": model_ready,
                                      "galleries": len(galleries), "error": state["error"]})
 
     @app.get("/api/v1/model/info")
     def model_info(model=Depends(require_engine)):
-        return model.info()
+        with lock:
+            return model.info()
 
     @app.get("/api/v1/gallery")
     def galleries():
-        return list_galleries(config["gallery"]["root"])
+        return available_galleries(config)
 
     @app.post("/api/v1/search", response_model=SearchResponse)
     def search(request: Request, image: UploadFile = File(...), modification: str = Form(...),
@@ -162,14 +182,14 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
         if not modification.strip() or len(modification) > config["inference"]["max_text_length"]:
             raise HTTPException(422, "Invalid modification length")
         decoded = decode_upload(image)
+        gallery = get_gallery(gallery_id)
         with lock:
-            gallery = get_gallery(gallery_id)
             output = model.retrieve(decoded, modification, top_k=top_k, gallery=gallery,
                                     exclude_ids=[reference_id] if reference_id else [],
                                     mode=mode, alpha=alpha, knowledge_k=knowledge_k, rag_profile=rag_profile)
         for row in output["results"]:
             row.pop("image_path")
-            row["image_url"] = f"/api/v1/gallery/{gallery_id}/images/{row['image_id']}"
+            row["image_url"] = f"/api/v1/gallery/{gallery_id}/images/{row['image_id']}?version={gallery.version}"
         output.update(request_id=request_id, latency_ms=(time.perf_counter() - start) * 1000)
         event = {k: output[k] for k in (
             "request_id", "model_version", "gallery_version", "knowledge_version", "latency_ms")}
@@ -195,8 +215,8 @@ def create_app(config_path=None, engine=None, load_on_startup=None):
             return remove_images(gallery.path, [image_id]).manifest
 
     @app.get("/api/v1/gallery/{gallery_id}/images/{image_id}")
-    def gallery_image(gallery_id: str, image_id: str):
-        gallery = get_gallery(gallery_id)
+    def gallery_image(gallery_id: str, image_id: str, version: str | None = None):
+        gallery = get_gallery(gallery_id, version)
         if image_id not in gallery.by_id:
             raise HTTPException(404, "Image not found")
         return FileResponse(gallery.image_path(image_id))

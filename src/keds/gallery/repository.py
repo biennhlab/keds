@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from pathlib import Path
 
 import numpy as np
 from filelock import FileLock
-from PIL import Image
 
 from keds.models.clip_encoder import rgb_image
 from keds.utils.io import read_json, sha256, write_json
@@ -36,19 +36,18 @@ def image_digest(image):
 
 
 class Gallery:
-    def __init__(self, path):
+    def __init__(self, path, version=None):
         self.path = Path(path).resolve()
         self.gallery_id = safe_id(self.path.name)
-        pointer = read_json(self.path / "CURRENT.json")
-        generation = safe_id(pointer["generation"])
+        generation = safe_id(read_json(self.path / "CURRENT.json")["generation"] if version is None else version)
         self.generation = self.path / "generations" / generation
         self.manifest = read_json(self.generation / "gallery_manifest.json")
         self.version = generation
-        if self.manifest["gallery_id"] != self.gallery_id:
-            raise ValueError("Gallery manifest ID mismatch")
+        if self.manifest["gallery_id"] != self.gallery_id or self.manifest["version"] != generation:
+            raise ValueError("Gallery manifest ID/version mismatch")
+        if set(self.manifest["checksums"]) != {"gallery.faiss", "gallery_metadata.jsonl", "gallery_embeddings.npy"}:
+            raise ValueError("Gallery checksums must cover all index artifacts")
         for name, expected in self.manifest["checksums"].items():
-            if name not in {"gallery.faiss", "gallery_metadata.jsonl", "gallery_embeddings.npy"}:
-                raise ValueError("Unknown gallery artifact")
             if sha256(self.generation / name) != expected:
                 raise ValueError(f"Gallery checksum mismatch: {name}")
         self.records = [json.loads(line) for line in
@@ -82,20 +81,24 @@ class Gallery:
             if not np.allclose(self.index.reconstruct_n(offset, len(block)), expected, atol=1e-6):
                 raise ValueError("Gallery FAISS vector order differs from metadata/embedding order")
         for row in self.records:
-            with Image.open(self.image_path(row["image_id"])) as image:
-                image.verify()
+            image = rgb_image(self.image_path(row["image_id"]))
+            if image_digest(image) != row["pixel_sha256"]:
+                raise ValueError(f"Gallery pixels differ from indexed image: {row['image_id']}")
         return {"gallery_id": self.gallery_id, "version": self.version,
                 "count": len(self.records), "valid": True}
 
-    def search(self, query, top_k=10, exclude_ids=(), exclude_hash=None, candidate_ids=None):
+    def search(self, query, top_k=10, exclude_ids=(), exclude_hash=None, candidate_ids=None,
+               include_image_paths=True):
         if top_k <= 0:
             raise ValueError("top_k must be positive")
-        excluded = set(exclude_ids)
+        excluded = set(exclude_ids) & self.by_id.keys()
         if exclude_hash:
             excluded.update(r["image_id"] for r in self.records if r["pixel_sha256"] == exclude_hash)
         q = normalized_numpy(query, self.index.d)
         if len(q) != 1:
             raise ValueError("Gallery.search expects one query")
+        if not self.records or len(excluded) == len(self.records):
+            return []
         if candidate_ids is None:
             scores, indices = self.index.search(q, min(len(self.records), top_k + len(excluded)))
         else:
@@ -113,8 +116,10 @@ class Gallery:
                 continue
             row = self.records[index]
             if row["image_id"] not in excluded:
-                output.append({"rank": len(output) + 1, "image_id": row["image_id"],
-                               "score": float(score), "image_path": str(self.image_path(row["image_id"]))})
+                result = {"rank": len(output) + 1, "image_id": row["image_id"], "score": float(score)}
+                if include_image_paths:
+                    result["image_path"] = str(self.image_path(row["image_id"]))
+                output.append(result)
             if len(output) == top_k:
                 break
         return output
@@ -149,8 +154,9 @@ def commit_gallery(path, records, embeddings, backbone, revision):
     # Validate vector/record correspondence before publishing.
     if index.ntotal != len(records) or not np.allclose(index.reconstruct_n(0, len(records)), embeddings):
         raise ValueError("Gallery commit validation failed")
+    snapshot = Gallery(path, version=generation_id)
     write_json(path / "CURRENT.json", {"generation": generation_id})
-    return Gallery(path)
+    return snapshot
 
 
 def add_images(path, images, encoder, image_ids=None, batch_size=16):
@@ -187,7 +193,11 @@ def add_images(path, images, encoder, image_ids=None, batch_size=16):
                 continue
             image_path = path / "images" / f"{digest}.png"
             if not image_path.exists():
-                image.save(image_path)
+                partial = image_path.with_suffix(".png.partial")
+                image.save(partial, format="PNG")
+                partial.replace(image_path)
+            elif image_digest(rgb_image(image_path)) != digest:
+                raise ValueError(f"Existing image storage differs; preserving {image_path.name}")
             record = {"image_id": image_id, "image_path": f"images/{digest}.png",
                       "pixel_sha256": digest, "width": image.width, "height": image.height}
             batch.append(image)
@@ -222,16 +232,23 @@ def remove_images(path, image_ids):
                               previous.manifest["backbone"], previous.manifest["clip_revision"])
 
 
-def list_galleries(root):
+def list_galleries(root, *, skip_invalid=False):
     root = Path(root)
     if not root.exists():
         return []
     output = []
     for pointer in sorted(root.glob("*/CURRENT.json")):
-        generation = safe_id(read_json(pointer)["generation"])
-        manifest = read_json(pointer.parent / "generations" / generation / "gallery_manifest.json")
-        if manifest["gallery_id"] != safe_id(pointer.parent.name):
-            raise ValueError("Gallery manifest ID mismatch")
-        output.append(manifest)
+        try:
+            generation = safe_id(read_json(pointer)["generation"])
+            manifest = read_json(pointer.parent / "generations" / generation / "gallery_manifest.json")
+            if manifest["gallery_id"] != safe_id(pointer.parent.name) or manifest["version"] != generation:
+                raise ValueError("Gallery manifest ID/version mismatch")
+            if not isinstance(manifest["count"], int) or manifest["count"] < 1:
+                raise ValueError("Gallery manifest has no images")
+            output.append(manifest)
+        except (ValueError, OSError, KeyError, TypeError):
+            if not skip_invalid:
+                raise
+            logging.getLogger(__name__).warning("Ignoring unreadable gallery: %s", pointer.parent.name)
     return output
 

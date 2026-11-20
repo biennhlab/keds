@@ -1,5 +1,12 @@
 # KEDs CC3M 500K · Composed Image Retrieval
 
+Chạy GPU trên Modal và mở Gradio qua trình duyệt: xem [hướng dẫn Modal](docs/modal.md).
+Entrypoint `deploy/modal_app.py` dùng checkpoint BEST tại revision riêng, Modal Secret cho HF_TOKEN
+và Volume cho artifacts/gallery. Đã xác minh upload → Gradio → KEDs → Top-3 ảnh thật trên Modal;
+xem chi tiết cấu hình HTTPS trong hướng dẫn.
+Nạp bộ ảnh thời trang: [Fashion-IQ → Modal gallery](docs/fashioniq_gallery.md).
+**Bắt đầu trình bày:** [Hướng dẫn demo, ca thử đã chạy và kết quả audit](docs/demo_audit.md).
+
 Hệ thống nhận **reference image + modification text**, chạy CLIP ViT-L/14,
 truy xuất knowledge CC3M 500K, tạo pseudo-words bằng Phi-M/Phi-A và trả về
 Top-K ảnh thật từ **target gallery riêng** qua FAISS. Có Python API, CLI,
@@ -11,7 +18,8 @@ reranking và versioned semantic/exact caches.
 ```powershell
 .venv/Scripts/python.exe scripts/search.py --image data/demo/dog.jpg --text "with two dogs instead of one" --gallery artifacts/gallery/demo --rag-profile combined_experimental --top-k 3
 .venv/Scripts/python.exe scripts/profile_rag.py --repeats 2
-# Gradio: chọn Research settings → RAG profile; REST: field rag_profile.
+# Muốn hiện các profile thử nghiệm trong Gradio: scripts/run_demo.py --show-experimental.
+# REST: field rag_profile.
 ```
 
 Đây là **author-style approximation v21** được chủ dự án huấn luyện trước,
@@ -29,7 +37,7 @@ cho latency và cần cho training/evaluation quy mô lớn.
 uv sync --frozen --extra dev
 # Tạo .env từ .env.example nếu chưa có; điền HF_TOKEN bằng trình soạn thảo.
 # Giữ nguyên .env đang có. Không đưa token lên Git.
-uv run --no-sync python scripts/download_artifacts.py --clip --resume
+uv run --no-sync python scripts/download_artifacts.py --clip
 uv run --no-sync python scripts/validate_artifacts.py --build-indexes
 uv run --no-sync python scripts/download_demo_images.py
 uv run --no-sync python scripts/build_gallery.py --input data/demo --output artifacts/gallery/demo --batch-size 2
@@ -56,7 +64,8 @@ file khác checksum được giữ nguyên và công cụ dừng với lỗi rõ
 | Artifact | Nguồn đã khóa |
 |---|---|
 | Knowledge DB, 500.000 cặp unit-normalized `[500000,768]` | `nightfurry/keds-500k-training-resume@f14b9e3568e8e57fe522c7cf3397dc973840d632` |
-| Phi-M/Phi-A BEST + LAST | `nightfurry/keds-500k-resume-training-v21@42dcde4c9b437e1eac8978c7bed9de117178b12b` |
+| Phi-M/Phi-A BEST (local và Modal) | `nightfurry/keds-500k-resume-training-v21@359deb00753a732d0c18342e843678eb49cb7919` |
+| LAST cũ cho optimizer continuation (`--resume`) | `nightfurry/keds-500k-resume-training-v21@42dcde4c9b437e1eac8978c7bed9de117178b12b` |
 | CLIP/tokenizer | `openai/clip-vit-large-patch14@32bd64288804d66eefd0ccbe215aa642df71cc41` |
 
 Đường dẫn, device, alpha, K và prompt ở `configs/model.yaml`; đường dẫn tương đối
@@ -153,16 +162,16 @@ tests tự skip nếu chưa checkout các metadata/source trong `references/`.
 [Fashion-IQ](https://github.com/XiaoxiaoGuo/fashion-iq) annotations/splits nằm ở
 `captions/` và `image_splits/`. [CIRR](https://www.zheyuanliu.me/CIRR/) cần nhánh
 `cirr_dataset` cho annotations và ảnh NLVR2 gốc theo hướng dẫn chủ dữ liệu.
-Repository không kèm full ảnh benchmark. Audit số lượng/split đã lưu ở
-`reports/fashioniq_protocol_audit.json` và `reports/cirr_protocol_audit.json`.
+Repository không commit dữ liệu ảnh benchmark. Fashion-IQ validation đã được nhập vào Modal Volume;
+`reports/fashioniq_import_actual.json` ghi kích thước và version của ba gallery đầy đủ.
 
 ```powershell
-# Fashion-IQ: lặp cho dress, shirt, toptee với các split tương ứng
-uv run --no-sync python scripts/build_gallery.py --input data/fashioniq/images --ids data/fashioniq/image_splits/split.dress.val.json --output artifacts/gallery/fashioniq/dress
-uv run --no-sync python scripts/evaluate.py --dataset fashioniq --data-root data/fashioniq --gallery-root artifacts/gallery/fashioniq --output reports/fashioniq_evaluation.json
+# Fashion-IQ: tạo dress, shirt, toptee từ cả ba official full validation splits
+uv run --no-sync python scripts/import_fashioniq.py --data-root data/fashioniq
+uv run --no-sync python scripts/evaluate.py --dataset fashioniq --data-root data/fashioniq --gallery-root artifacts/gallery --output reports/fashioniq_evaluation.json
 # CIRR val: --input trỏ vào img_raw/dev; --ids giữ nguyên ID của split dictionary
 uv run --no-sync python scripts/build_gallery.py --input data/cirr/img_raw/dev --ids data/cirr/image_splits/split.rc2.val.json --output artifacts/gallery/cirr-val/cirr
-uv run --no-sync python scripts/evaluate.py --dataset cirr --data-root data/cirr --gallery-root artifacts/gallery/cirr-val --ablation --output reports/cirr_ablation.json
+uv run --no-sync python scripts/evaluate.py --dataset cirr --data-root data/cirr --gallery-root artifacts/gallery/cirr-val --output reports/cirr_evaluation.json
 ```
 
 Fashion-IQ: full gallery mỗi category, caption2 + `and` + caption1 theo official
@@ -174,7 +183,8 @@ alpha 0/0.25/0.5/0.75/1 và K=4/8/16/32. Mỗi report ghi provenance, hashes và
 diagnostics target rank/Top10; không cho phép sampled gallery trá hình full benchmark.
 Chưa xác minh overlap CC3M/benchmark bằng raw image hashes do artifacts thiếu dữ liệu đó.
 
-**Chưa có benchmark mới được công bố.** Sáu ảnh demo chỉ xác minh chức năng.
+Sáu ảnh demo và các gallery `fashion-demo-*` chỉ phục vụ kiểm tra chức năng/trình bày.
+Xem [audit demo](docs/demo_audit.md) để phân biệt kết quả mẫu với benchmark đầy đủ.
 
 ## Training / resume
 
